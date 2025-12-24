@@ -35,7 +35,7 @@ def normalize(name: str) -> str:
 
 def variation_rate(series: pd.Series) -> float:
     series = series.dropna()
-    if len(series) < 2:
+    if len(series) < 2 or series.mean() == 0:
         return np.nan
     return (series.max() - series.min()) / series.mean()
 
@@ -64,7 +64,7 @@ def load_environment_data():
             name = normalize(file.name)
             try:
                 df = pd.read_csv(file)
-                df["time"] = pd.to_datetime(df["time"])
+                df["time"] = pd.to_datetime(df["time"], errors="coerce")
                 school = name.replace("_환경데이터.csv", "")
                 if school in PERIODS:
                     start, end = PERIODS[school]
@@ -78,20 +78,24 @@ def load_environment_data():
 def load_growth_data():
     data_dir = Path("data")
     target = None
+
     for file in data_dir.iterdir():
         if file.suffix.lower() == ".xlsx" and "생육결과데이터" in normalize(file.name):
             target = file
             break
+
     if target is None:
         return {}
 
     xls = pd.ExcelFile(target, engine="openpyxl")
     result = {}
+
     for sheet in xls.sheet_names:
         try:
             result[sheet] = pd.read_excel(xls, sheet_name=sheet)
         except Exception:
             continue
+
     return result
 
 with st.spinner("데이터 로딩 중..."):
@@ -126,15 +130,15 @@ with tab1:
         생육 결과를 비교하여 환경 요인이 생중량에 미치는 영향을 분석하는 것을 목표로 한다.
 
         **연구 목적**
-        - EC만을 기준으로 생육을 설명하는 데에는 한계가 있음  
-          (명목상 EC 1·2·4·8이었으나 실제 측정값은 약 0.7, 1, 4, 7.8 수준)
-        - 단일 변수(EC) 중심 해석은 현실 환경을 충분히 반영하지 못함
-        - 다른 조에서도 언급되었듯, 다양한 환경 변수의 동시 고려가 필요함
+        - EC 단일 변수(1·2·4·8) 기준 해석의 한계  
+          → 실제 측정 EC는 약 0.7, 1, 4, 7.8 수준
+        - 현실 환경에서는 여러 요인이 동시에 작용함
+        - 다른 조에서도 제기된 것처럼 다변수 기반 분석이 필요함
 
-        **변동량(변화율)을 사용하는 이유**
-        1. 나도수영은 극지 환경에 적응한 식물로, 절대값보다 환경 변화에 대한 내성이 중요함  
-        2. 제한된 데이터 조건에서 평균보다 더 많은 정보를 끌어내기 위해 변동성 지표를 활용함  
-        3. 환경의 ‘안정성’이 생육에 미치는 영향을 정량적으로 비교하기 위함
+        **변동률(변화율)을 사용하는 이유**
+        1. 나도수영은 극지 환경에 적응한 식물로, 절대값보다 변화에 대한 내성이 중요함  
+        2. 제한된 데이터에서 추가 정보를 끌어내기 위해 변동성 지표를 사용함  
+        3. 환경의 안정성과 생육 간 관계를 정량화하기 위함
         """
     )
 
@@ -154,14 +158,8 @@ with tab1:
     )
 
     fig = go.Figure()
-    indicators = ["온도", "습도", "pH", "EC"]
-
-    for ind in indicators:
-        fig.add_bar(
-            x=avg_df["학교"],
-            y=avg_df[ind],
-            name=ind
-        )
+    for col in ["온도", "습도", "pH", "EC"]:
+        fig.add_bar(x=avg_df["학교"], y=avg_df[col], name=col)
 
     fig.update_layout(
         barmode="group",
@@ -181,12 +179,105 @@ with tab2:
     rows = []
     for school, env_df in env_data.items():
         gdf = growth_data.get(school)
-        if gdf is None:
+        if gdf is None or "생중량(g)" not in gdf.columns:
             continue
+
         rows.append([
             school,
             variation_rate(env_df["temperature"]),
             variation_rate(env_df["humidity"]),
             variation_rate(env_df["ph"]),
             variation_rate(env_df["ec"]),
-            gdf["생중량(g)]()
+            gdf["생중량(g)"].mean()
+        ])
+
+    vdf = pd.DataFrame(
+        rows,
+        columns=["학교", "온도 변동률", "습도 변동률", "pH 변동률", "EC 변동률", "평균 생중량"]
+    )
+
+    fig2 = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=[
+            "온도 변동률 vs 생중량",
+            "습도 변동률 vs 생중량",
+            "pH 변동률 vs 생중량",
+            "EC 변동률 vs 생중량"
+        ],
+        specs=[[{"secondary_y": True}]*2]*2
+    )
+
+    indicators = ["온도 변동률", "습도 변동률", "pH 변동률", "EC 변동률"]
+    positions = [(1,1),(1,2),(2,1),(2,2)]
+
+    for ind, (r, c) in zip(indicators, positions):
+        fig2.add_bar(
+            x=vdf["학교"],
+            y=vdf[ind],
+            row=r, col=c,
+            name=ind
+        )
+        fig2.add_scatter(
+            x=vdf["학교"],
+            y=vdf["평균 생중량"],
+            mode="lines+markers",
+            row=r, col=c,
+            secondary_y=True,
+            name="평균 생중량"
+        )
+
+    fig2.update_layout(font=PLOTLY_FONT, height=800)
+    st.plotly_chart(fig2, use_container_width=True)
+
+# ==================================================
+# Tab 3 : 결과 분석
+# ==================================================
+with tab3:
+    st.subheader("환경 변동률과 생중량 간 상관계수")
+
+    fig3 = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=["하늘고", "동산고", "아라고", "송도고"]
+    )
+
+    positions = {
+        "하늘고": (1,1),
+        "동산고": (1,2),
+        "아라고": (2,1),
+        "송도고": (2,2)
+    }
+
+    for school, (r, c) in positions.items():
+        env_df = env_data.get(school)
+        gdf = growth_data.get(school)
+
+        if env_df is None or gdf is None or "생중량(g)" not in gdf.columns:
+            continue
+
+        min_len = min(len(env_df), len(gdf))
+
+        corr = [
+            np.corrcoef(env_df["temperature"][:min_len], gdf["생중량(g)"][:min_len])[0,1],
+            np.corrcoef(env_df["humidity"][:min_len], gdf["생중량(g)"][:min_len])[0,1],
+            np.corrcoef(env_df["ph"][:min_len], gdf["생중량(g)"][:min_len])[0,1],
+            np.corrcoef(env_df["ec"][:min_len], gdf["생중량(g)"][:min_len])[0,1],
+        ]
+
+        fig3.add_bar(
+            x=["온도", "습도", "pH", "EC"],
+            y=corr,
+            row=r, col=c
+        )
+
+    fig3.update_layout(font=PLOTLY_FONT, height=800)
+    st.plotly_chart(fig3, use_container_width=True)
+
+    buffer = io.BytesIO()
+    vdf.to_excel(buffer, index=False, engine="openpyxl")
+    buffer.seek(0)
+    st.download_button(
+        "분석 요약 XLSX 다운로드",
+        data=buffer,
+        file_name="환경변동률_생중량_분석.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
