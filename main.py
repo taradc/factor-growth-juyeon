@@ -15,7 +15,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# 한글 폰트 (Streamlit)
+# 한글 폰트
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR&display=swap');
@@ -42,26 +42,14 @@ def variation_rate(series: pd.Series) -> float:
         return np.nan
     return (series.max() - series.min()) / mean
 
-def filter_by_period_safe(df: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+def filter_by_period_safe(df, start, end):
     df = df.copy()
-
     if "time" not in df.columns:
         return df
-
     df["time"] = pd.to_datetime(df["time"], errors="coerce")
-    df = df.dropna(subset=["time"])
-    df = df.sort_values("time")
-
-    start = pd.to_datetime(start)
-    end = pd.to_datetime(end)
-
+    df = df.dropna(subset=["time"]).sort_values("time")
     filtered = df[(df["time"] >= start) & (df["time"] <= end)]
-
-    # 🔴 기간 필터링 결과가 비면 → 전체 사용
-    if filtered.empty:
-        return df
-
-    return filtered
+    return filtered if not filtered.empty else df
 
 # ===============================
 # 데이터 로딩
@@ -69,60 +57,29 @@ def filter_by_period_safe(df: pd.DataFrame, start: str, end: str) -> pd.DataFram
 @st.cache_data
 def load_environment_data():
     env = {}
-    data_dir = Path("data")
-
-    if not data_dir.exists():
-        return env
-
-    for file in data_dir.iterdir():
-        if file.suffix.lower() == ".csv":
-            fname = normalize_text(file.name)
-            if "환경데이터" in fname:
-                df = pd.read_csv(file)
-                school = fname.replace("_환경데이터.csv", "")
-                env[school] = df
-
+    for f in Path("data").iterdir():
+        if f.suffix == ".csv" and "환경데이터" in normalize_text(f.name):
+            env[normalize_text(f.name).replace("_환경데이터.csv", "")] = pd.read_csv(f)
     return env
 
 @st.cache_data
 def load_growth_data():
-    data_dir = Path("data")
-    target = None
+    for f in Path("data").iterdir():
+        if f.suffix == ".xlsx" and "생육결과데이터" in normalize_text(f.name):
+            xls = pd.ExcelFile(f, engine="openpyxl")
+            return {s: pd.read_excel(xls, sheet_name=s) for s in xls.sheet_names}
+    return {}
 
-    for file in data_dir.iterdir():
-        if file.suffix.lower() == ".xlsx" and "생육결과데이터" in normalize_text(file.name):
-            target = file
-            break
-
-    if target is None:
-        return {}
-
-    xls = pd.ExcelFile(target, engine="openpyxl")
-    result = {}
-
-    for sheet in xls.sheet_names:
-        result[sheet] = pd.read_excel(xls, sheet_name=sheet)
-
-    return result
-
-with st.spinner("데이터 로딩 중..."):
-    env_data = load_environment_data()
-    growth_data = load_growth_data()
+env_data = load_environment_data()
+growth_data = load_growth_data()
 
 if not env_data or not growth_data:
-    st.error("데이터를 불러올 수 없습니다. data 폴더와 파일명을 확인하세요.")
+    st.error("데이터 로딩 실패")
     st.stop()
 
 # ===============================
 # 메타 정보
 # ===============================
-EC_INFO = {
-    "송도고": 1.0,
-    "하늘고": 2.0,
-    "아라고": 4.0,
-    "동산고": 8.0
-}
-
 PERIODS = {
     "동산고": ("2024-06-19", "2024-07-17"),
     "송도고": ("2024-05-19", "2024-07-10"),
@@ -130,143 +87,108 @@ PERIODS = {
     "아라고": ("2024-05-26", "2024-06-24")
 }
 
-st.sidebar.selectbox("학교 선택", ["전체"] + list(EC_INFO.keys()))
-
-# ===============================
-# 제목
-# ===============================
 st.title("다양한 환경 변동과 나도수영의 생장률 분석")
 
 tab1, tab2, tab3 = st.tabs(["실험 개요", "환경 데이터 분석", "결과 분석"])
 
 # ==================================================
-# Tab 1 : 실험 개요
-# ==================================================
-with tab1:
-    st.subheader("연구 배경 및 목적")
-    st.markdown("""
-**목적**  
-본 연구는 극지식물 *나도수영*의 생육을 단일 환경 요인(EC 농도)만으로 설명하기 어렵다는
-실험적 한계에서 출발하였다. 실제 EC 조건은 1·2·4·8이 아닌
-약 **0.7·1·4·7.8 수준**으로 완전히 분리되지 않았다.
-
-이에 따라 본 연구는 온도, 습도, pH, EC의 **변동률**을 중심으로
-환경 변화에 대한 생육 반응을 분석하였다.
-
-1. 극지식물은 절대 조건보다 환경 변화에 대한 적응 반응이 중요하다  
-2. 제한된 데이터에서 최대한의 해석 정보를 도출한다  
-3. 학교별 실험 기간 차이를 고려하여 분석한다
-""")
-
-    avg_rows = []
-    for school, df in env_data.items():
-        df_f = filter_by_period_safe(df, *PERIODS[school])
-        avg_rows.append([
-            school,
-            df_f["temperature"].mean(),
-            df_f["humidity"].mean(),
-            df_f["ph"].mean(),
-            df_f["ec"].mean()
-        ])
-
-    avg_df = pd.DataFrame(avg_rows, columns=["학교", "온도", "습도", "pH", "EC"])
-
-    fig1 = go.Figure()
-    for col in ["온도", "습도", "pH", "EC"]:
-        fig1.add_bar(x=avg_df["학교"], y=avg_df[col], name=col)
-
-    fig1.update_layout(
-        barmode="group",
-        title="학교별 환경 지표 평균",
-        font=PLOTLY_FONT,
-        height=600
-    )
-    st.plotly_chart(fig1, use_container_width=True)
-
-# ==================================================
-# Tab 2 : 환경 데이터 분석
+# Tab 2 : 환경 데이터 분석 (습도 분리)
 # ==================================================
 with tab2:
     rows = []
-    for school, env_df in env_data.items():
-        gdf = growth_data.get(school)
-        if gdf is None:
-            continue
-
-        env_df = filter_by_period_safe(env_df, *PERIODS[school])
-
+    for s in env_data:
+        env = filter_by_period_safe(env_data[s], *PERIODS[s])
+        g = growth_data[s]
         rows.append([
-            school,
-            variation_rate(env_df["temperature"]),
-            variation_rate(env_df["humidity"]),
-            variation_rate(env_df["ph"]),
-            variation_rate(env_df["ec"]),
-            gdf["생중량(g)"].mean()
+            s,
+            variation_rate(env["temperature"]),
+            variation_rate(env["humidity"]),
+            env["humidity"].mean(),
+            variation_rate(env["ph"]),
+            variation_rate(env["ec"]),
+            g["생중량(g)"].mean()
         ])
 
     vdf = pd.DataFrame(rows, columns=[
-        "학교", "온도 변동률", "습도 변동률", "pH 변동률", "EC 변동률", "평균 생중량"
+        "학교","온도 변동률","습도 변동률","습도 평균","pH 변동률","EC 변동률","평균 생중량"
     ])
 
     fig2 = make_subplots(
-        rows=2, cols=2,
+        rows=3, cols=2,
         subplot_titles=[
             "온도 변동률 vs 생중량",
             "습도 변동률 vs 생중량",
+            "습도 절대값 vs 생중량",
             "pH 변동률 vs 생중량",
             "EC 변동률 vs 생중량"
         ],
-        specs=[[{"secondary_y": True}]*2]*2
+        specs=[
+            [{"secondary_y": True}, {"secondary_y": True}],
+            [{"secondary_y": True}, {"secondary_y": True}],
+            [{"secondary_y": True}, None]
+        ]
     )
 
-    for i, col in enumerate(["온도 변동률", "습도 변동률", "pH 변동률", "EC 변동률"]):
-        r, c = divmod(i, 2)
-        fig2.add_bar(x=vdf["학교"], y=vdf[col], row=r+1, col=c+1)
-        fig2.add_scatter(
-            x=vdf["학교"], y=vdf["평균 생중량"],
-            mode="lines+markers", secondary_y=True,
-            row=r+1, col=c+1
-        )
+    fig2.add_bar(x=vdf["학교"], y=vdf["온도 변동률"], row=1, col=1)
+    fig2.add_scatter(x=vdf["학교"], y=vdf["평균 생중량"], secondary_y=True, row=1, col=1)
 
-    fig2.update_layout(font=PLOTLY_FONT, height=800)
+    fig2.add_bar(x=vdf["학교"], y=vdf["습도 변동률"], row=1, col=2)
+    fig2.add_scatter(x=vdf["학교"], y=vdf["평균 생중량"], secondary_y=True, row=1, col=2)
+
+    fig2.add_bar(x=vdf["학교"], y=vdf["습도 평균"], row=2, col=2)
+    fig2.add_scatter(x=vdf["학교"], y=vdf["평균 생중량"], secondary_y=True, row=2, col=2)
+
+    fig2.add_bar(x=vdf["학교"], y=vdf["pH 변동률"], row=2, col=1)
+    fig2.add_scatter(x=vdf["학교"], y=vdf["평균 생중량"], secondary_y=True, row=2, col=1)
+
+    fig2.add_bar(x=vdf["학교"], y=vdf["EC 변동률"], row=3, col=1)
+    fig2.add_scatter(x=vdf["학교"], y=vdf["평균 생중량"], secondary_y=True, row=3, col=1)
+
+    fig2.update_layout(font=PLOTLY_FONT, height=1000)
     st.plotly_chart(fig2, use_container_width=True)
 
 # ==================================================
-# Tab 3 : 결과 분석
+# Tab 3 : 결과 분석 (요인별 상관계수)
 # ==================================================
 with tab3:
-    fig3 = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=["하늘고", "동산고", "아라고", "송도고"]
+    factors = ["temperature","humidity","ph","ec"]
+    factor_kor = ["온도","습도","pH","EC"]
+
+    corr_result = []
+    for f in factors:
+        vals = []
+        for s in env_data:
+            env = filter_by_period_safe(env_data[s], *PERIODS[s])
+            g = growth_data[s]
+            n = min(len(env), len(g))
+            if n >= 2:
+                vals.append(np.corrcoef(env[f][:n], g["생중량(g)"][:n])[0,1])
+        corr_result.append(np.nanmean(vals))
+
+    corr_df = pd.DataFrame({"환경요인": factor_kor, "평균 상관계수": corr_result})
+
+    fig3 = go.Figure(go.Bar(
+        x=corr_df["환경요인"],
+        y=corr_df["평균 상관계수"]
+    ))
+    fig3.update_layout(
+        title="환경 요인별 생중량과의 평균 상관계수",
+        font=PLOTLY_FONT,
+        height=500
     )
-
-    pos = {"하늘고": (1,1), "동산고": (1,2), "아라고": (2,1), "송도고": (2,2)}
-
-    for school, (r,c) in pos.items():
-        env_df = filter_by_period_safe(env_data[school], *PERIODS[school])
-        gdf = growth_data[school]
-
-        n = min(len(env_df), len(gdf))
-        if n < 2:
-            corr = [np.nan]*4
-        else:
-            corr = [
-                np.corrcoef(env_df[k].iloc[:n], gdf["생중량(g)"].iloc[:n])[0,1]
-                for k in ["temperature", "humidity", "ph", "ec"]
-            ]
-
-        fig3.add_bar(x=["온도","습도","pH","EC"], y=corr, row=r, col=c)
-
-    fig3.update_layout(font=PLOTLY_FONT, height=800)
     st.plotly_chart(fig3, use_container_width=True)
 
-    buffer = io.BytesIO()
-    vdf.to_excel(buffer, index=False, engine="openpyxl")
-    buffer.seek(0)
+    st.markdown("""
+**상관관계 해석**  
+상관계수는 두 변수 간의 관계 방향과 강도를 나타낸다.  
+양의 상관관계는 환경 요인이 증가할수록 생중량이 증가하는 경향을,
+음의 상관관계는 환경 요인이 증가할수록 생중량이 감소하는 경향을 의미한다.
 
-    st.download_button(
-        "분석 요약 XLSX 다운로드",
-        data=buffer,
-        file_name="환경변동률_생중량_분석.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+분석 결과, 환경 요인별로 생중량과의 상관 강도는 서로 다르게 나타났다.  
+특히 **EC의 경우**, 네 학교 데이터를 종합했을 때 변동률 기준으로 비교적 강한
+음의 상관관계가 관측되었다.  
+다만 EC 절대값이 특히 높았던 아라고의 경우,
+변동률은 낮았음에도 생장률이 낮게 나타나는 예외적 경향이 확인되었다.
+
+이는 단일 요인보다는 **환경 변화의 맥락을 함께 고려해야 함**을 시사한다.
+""")
